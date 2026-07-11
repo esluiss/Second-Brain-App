@@ -13,3 +13,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 class Config:
     # 4. Le decimos a SQLite que guarde el archivo brain.db dentro de esa carpeta
     DB_PATH = os.path.join(DATA_DIR, "brain.db")
+
+    # 5. Clave de Groq (https://console.groq.com/keys) para el Asistente IA.
+    #    ★ PON TU CLAVE AQUÍ ABAJO (reemplaza el texto entre comillas) ★
+    #    No edites core/groq_assistant.py — este es el único lugar necesario.
+    #    Prioridad: variable de entorno GROQ_API_KEY > este valor.
+    #    No subas este archivo con tu clave real a un repositorio público.
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")

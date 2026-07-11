@@ -5,6 +5,7 @@ import os
 import sys
 import math
 import statistics as _stats_lib
+from pathlib import Path
 
 # ── QApplication DEBE existir antes que cualquier QWidget ─────────────────────
 from PyQt6.QtWidgets import QApplication
@@ -13,9 +14,9 @@ _app = QApplication.instance() or QApplication(sys.argv)
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox,
+    QLabel, QPushButton, QTextEdit, QLineEdit, QComboBox, QSlider,
     QFrame, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect,
-    QScrollArea, QFileDialog, QToolBar,
+    QScrollArea, QFileDialog, QToolBar, QMessageBox,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
@@ -34,6 +35,15 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from services.brain_service import BrainService
+
+# El asistente de IA (Groq + búsqueda web) es opcional: si falta 'requests'
+# o el usuario no configuró su API key, la app sigue funcionando con
+# normalidad y solo el panel de Asistente IA mostrará un aviso.
+try:
+    from core.groq_assistant import responder_con_busqueda as _ia_responder_con_busqueda
+    _HAS_IA = True
+except Exception:
+    _HAS_IA = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -180,15 +190,20 @@ class FadeIn(QObject):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class RingWidget(QWidget):
-    def __init__(self, size=240, parent=None):
+    def __init__(self, size=240, parent=None, color=None):
         super().__init__(parent)
         self._size = size
         self.setFixedSize(size, size)
         self._fraction = 1.0
+        self._color = color  # None = usa el color del tema (ring_fg)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_fraction(self, v: float):
         self._fraction = max(0.0, min(1.0, v))
+        self.update()
+
+    def set_color(self, color: str):
+        self._color = color
         self.update()
 
     def paintEvent(self, _):
@@ -204,7 +219,7 @@ class RingWidget(QWidget):
         p.drawEllipse(rect)
 
         if self._fraction > 0:
-            pen_fg = QPen(QColor(c("ring_fg")), 13, Qt.PenStyle.SolidLine,
+            pen_fg = QPen(QColor(self._color or c("ring_fg")), 13, Qt.PenStyle.SolidLine,
                           Qt.PenCapStyle.RoundCap)
             p.setPen(pen_fg)
             span = int(self._fraction * 360 * 16)
@@ -365,9 +380,11 @@ class SectionHeader(QWidget):
 class BarChartWidget(QWidget):
     """Gráfico de barras verticales pintado con QPainter. Sin dependencias externas."""
 
+    COLOR_DESCANSO = "#F4B400"   # ámbar, distinto del azul primario (estudio)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._sessions = []   # lista de dicts {'nombre': str, 'minutos': int}
+        self._sessions = []   # lista de dicts {'nombre': str, 'minutos': int, 'minutos_descanso': int}
         self.setMinimumHeight(270)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -393,15 +410,17 @@ class BarChartWidget(QWidget):
             return
 
         # ── Márgenes ───────────────────────────────────────────────────────────
-        PAD_L, PAD_R, PAD_T, PAD_B = 54, 20, 30, 56
+        PAD_L, PAD_R, PAD_T, PAD_B = 54, 20, 42, 56
         chart_w = W - PAD_L - PAD_R
         chart_h = H - PAD_T - PAD_B
 
-        values  = [s["minutos"] for s in self._sessions]
-        max_val = max(values) if values else 1
+        valores_estudio  = [s["minutos"] for s in self._sessions]
+        valores_descanso = [s.get("minutos_descanso", 0) for s in self._sessions]
+        max_val = max(valores_estudio + valores_descanso + [1])
         n       = len(self._sessions)
         slot_w  = chart_w / n
-        bar_w   = max(14.0, min(64.0, slot_w * 0.58))
+        group_w = max(20.0, min(96.0, slot_w * 0.62))
+        bar_w   = max(6.0, group_w / 2 - 2)
 
         # ── Líneas de cuadrícula horizontales ─────────────────────────────────
         grid_steps = 4
@@ -425,32 +444,68 @@ class BarChartWidget(QWidget):
         p.drawLine(PAD_L, PAD_T, PAD_L, H - PAD_B)
         p.drawLine(PAD_L, H - PAD_B, W - PAD_R, H - PAD_B)
 
-        # ── Barras ────────────────────────────────────────────────────────────
-        bar_color = QColor(c("primary"))
-        bar_color.setAlpha(210)
+        # ── Colores ──────────────────────────────────────────────────────────
+        color_estudio = QColor(c("primary"))
+        color_estudio.setAlpha(210)
+        color_descanso = QColor(self.COLOR_DESCANSO)
+        color_descanso.setAlpha(210)
 
+        # ── Leyenda (arriba a la derecha) ───────────────────────────────────
+        leg_x = W - PAD_R - 176
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color_estudio)
+        p.drawRoundedRect(QRectF(leg_x, 8, 12, 12), 3, 3)
+        p.setPen(QColor(c("text2")))
+        p.setFont(QFont("Segoe UI", 9))
+        p.drawText(QRect(int(leg_x) + 18, 4, 78, 20),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Estudio")
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color_descanso)
+        p.drawRoundedRect(QRectF(leg_x + 88, 8, 12, 12), 3, 3)
+        p.setPen(QColor(c("text2")))
+        p.drawText(QRect(int(leg_x) + 88 + 18, 4, 78, 20),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "Descanso")
+
+        # ── Barras (agrupadas: estudio + descanso por sesión) ─────────────────
         for i, s in enumerate(self._sessions):
             x_center = PAD_L + slot_w * i + slot_w / 2
-            bx       = x_center - bar_w / 2
-            bh       = max(4.0, chart_h * s["minutos"] / max_val)
-            by       = H - PAD_B - bh
+            gx       = x_center - group_w / 2
 
-            # Barra redondeada
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(bar_color)
-            p.drawRoundedRect(QRectF(bx, by, bar_w, bh), 5, 5)
+            m_estudio  = s["minutos"]
+            m_descanso = s.get("minutos_descanso", 0)
 
-            # Valor encima de la barra
-            p.setPen(QColor(c("text")))
-            p.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-            p.drawText(QRect(int(bx - 10), int(by) - 22, int(bar_w + 20), 18),
-                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
-                       f"{s['minutos']}m")
+            # Barra de estudio
+            bx1 = gx
+            bh1 = max(4.0, chart_h * m_estudio / max_val) if m_estudio > 0 else 0.0
+            by1 = H - PAD_B - bh1
+            if bh1 > 0:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color_estudio)
+                p.drawRoundedRect(QRectF(bx1, by1, bar_w, bh1), 4, 4)
+                p.setPen(QColor(c("text")))
+                p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                p.drawText(QRect(int(bx1 - 8), int(by1) - 18, int(bar_w + 16), 16),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                           f"{m_estudio}m")
+
+            # Barra de descanso
+            bx2 = gx + bar_w + 4
+            bh2 = max(4.0, chart_h * m_descanso / max_val) if m_descanso > 0 else 0.0
+            by2 = H - PAD_B - bh2
+            if bh2 > 0:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color_descanso)
+                p.drawRoundedRect(QRectF(bx2, by2, bar_w, bh2), 4, 4)
+                p.setPen(QColor(c("text")))
+                p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                p.drawText(QRect(int(bx2 - 8), int(by2) - 18, int(bar_w + 16), 16),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                           f"{m_descanso}m")
 
             # Etiqueta eje X  (S1, S2, …)
             p.setPen(QColor(c("text2")))
             p.setFont(QFont("Segoe UI", 9))
-            p.drawText(QRect(int(bx - 10), H - PAD_B + 6, int(bar_w + 20), 22),
+            p.drawText(QRect(int(gx - 10), H - PAD_B + 6, int(group_w + 20), 22),
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                        f"S{i + 1}")
 
@@ -462,20 +517,42 @@ class BarChartWidget(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class PomodoroPanel(QWidget):
-    # Señal que se emite cada vez que el usuario guarda una sesión oficial
     sesion_guardada = pyqtSignal()
+
+    ESTUDIO_SEG  = 25 * 60
+    DESCANSO_SEG = 5  * 60
 
     def __init__(self, cerebro, parent=None):
         super().__init__(parent)
         self.cerebro = cerebro
-        self._tiempo_inicial = 25 * 60
-        self._segundos = 25 * 60
-        self._corriendo = False
+
+        self._tiempo_inicial = self.ESTUDIO_SEG
+        self._segundos       = self.ESTUDIO_SEG
+        self._corriendo      = False
+        self._en_descanso    = False
+        self._seg_descanso   = self.DESCANSO_SEG
+        self._descanso_registrado = True   # no hay descanso en curso al iniciar
+
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick)
+
+        self._timer_descanso = QTimer(self)
+        self._timer_descanso.setInterval(1000)
+        self._timer_descanso.timeout.connect(self._tick_descanso)
+
+        self._timer_reloj = QTimer(self)
+        self._timer_reloj.setInterval(1000)
+        self._timer_reloj.timeout.connect(self._actualizar_reloj)
+        self._timer_reloj.start()
+
+        self._player     = None
+        self._playlist   = []
+        self._music_dir  = None
+
         self._build()
 
+    # ─────────────────────────────────────────────────────────────
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -492,107 +569,224 @@ class PomodoroPanel(QWidget):
         self.bg_widget = QWidget()
         self.bg_widget.setStyleSheet(f"background: {c('bg')};")
         vbox = QVBoxLayout(self.bg_widget)
-        vbox.setContentsMargins(40, 40, 40, 40)
+        vbox.setContentsMargins(32, 28, 32, 28)
+        vbox.setSpacing(18)
         vbox.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
+        # ── Card principal: ambos contadores lado a lado ──────────
         self.card = Card()
+        self.card.setMaximumWidth(860)
         cl = QVBoxLayout(self.card)
-        cl.setContentsMargins(56, 44, 56, 44)
+        cl.setContentsMargins(40, 28, 40, 28)
         cl.setSpacing(0)
-        cl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
-        # Ring + reloj
+        # Hora actual centrada
+        self.lbl_hora_actual = make_label("00:00:00", 14, color_key="text2")
+        self.lbl_hora_actual.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cl.addWidget(self.lbl_hora_actual)
+        cl.addSpacing(16)
+
+        # Fila de los dos contadores
+        timers_row = QHBoxLayout()
+        timers_row.setSpacing(24)
+        timers_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        # ── Bloque CONCENTRACIÓN ────────────────────────────────
+        col_estudio = QVBoxLayout()
+        col_estudio.setSpacing(6)
+        col_estudio.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        lbl_titulo_estudio = make_label("📚  Concentración", 12, bold=True, color_key="primary")
+        lbl_titulo_estudio.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_estudio.addWidget(lbl_titulo_estudio)
+
         ring_container = QWidget()
-        ring_container.setFixedSize(240, 240)
+        ring_container.setFixedSize(200, 200)
         ring_container.setStyleSheet("background: transparent;")
-        self.ring = RingWidget(240, ring_container)
+        self.ring = RingWidget(200, ring_container)
         self.lbl_clock = QLabel("25:00", ring_container)
-        set_font(self.lbl_clock, 46, bold=True)
+        set_font(self.lbl_clock, 38, bold=True)
         self.lbl_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_clock.setFixedSize(240, 240)
+        self.lbl_clock.setFixedSize(200, 200)
         self.lbl_clock.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
-        cl.addWidget(ring_container, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_estudio.addWidget(ring_container, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        cl.addSpacing(12)
-        self.lbl_estado = make_label("Listo para comenzar", 13, color_key="text2")
+        self.lbl_estado = make_label("Listo para comenzar", 12, color_key="text2")
         self.lbl_estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cl.addWidget(self.lbl_estado)
-        cl.addSpacing(10)
+        col_estudio.addWidget(self.lbl_estado)
 
-        # ── Estadísticas (texto acumulado + botón papelera) ─────────────────
+        timers_row.addLayout(col_estudio)
+
+        # ── Separador vertical ──────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedWidth(1)
+        sep.setStyleSheet(f"background: {c('border')}; border: none;")
+        timers_row.addWidget(sep)
+
+        # ── Bloque DESCANSO ─────────────────────────────────────
+        col_descanso = QVBoxLayout()
+        col_descanso.setSpacing(6)
+        col_descanso.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        self.lbl_titulo_descanso = make_label("☕  Descanso", 12, bold=True, color_key="text3")
+        self.lbl_titulo_descanso.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_descanso.addWidget(self.lbl_titulo_descanso)
+
+        ring_descanso_container = QWidget()
+        ring_descanso_container.setFixedSize(200, 200)
+        ring_descanso_container.setStyleSheet("background: transparent;")
+        self.ring_descanso = RingWidget(200, ring_descanso_container, color="#555566")
+        self.lbl_descanso_clock = QLabel("05:00", ring_descanso_container)
+        set_font(self.lbl_descanso_clock, 38, bold=True)
+        self.lbl_descanso_clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_descanso_clock.setFixedSize(200, 200)
+        self.lbl_descanso_clock.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
+        col_descanso.addWidget(ring_descanso_container, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.lbl_descanso_estado = make_label("Espera tu descanso", 12, color_key="text3")
+        self.lbl_descanso_estado.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        col_descanso.addWidget(self.lbl_descanso_estado)
+
+        timers_row.addLayout(col_descanso)
+        cl.addLayout(timers_row)
+        cl.addSpacing(20)
+
+        # Estadísticas
         stat_lay = QHBoxLayout()
         stat_lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-        self.lbl_horas = make_label("Tiempo: 0 h 0 min", 13, color_key="primary")
+        self.lbl_horas = make_label("Tiempo enfocado: 0 h 0 min", 13, color_key="primary")
         stat_lay.addWidget(self.lbl_horas)
-
         self.btn_borrar_stat = QPushButton(" 🗑 ")
         self.btn_borrar_stat.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_borrar_stat.setStyleSheet(
             f"color: {c('danger')}; background: transparent; border: none; font-size: 15px;"
         )
-        self.btn_borrar_stat.setToolTip("Guardar / descartar tiempo acumulado")
         self.btn_borrar_stat.clicked.connect(self._borrar_estadisticas)
         stat_lay.addWidget(self.btn_borrar_stat)
-
         cl.addLayout(stat_lay)
         self._actualizar_estadisticas()
-        cl.addSpacing(26)
+        cl.addSpacing(20)
 
-        # Botones start/reset
+        # Botones principales
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
         btn_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.btn_start = primary_btn("  ▶  Iniciar", w=150, h=46)
+        self.btn_start = primary_btn("  ▶  Iniciar", w=150, h=44)
         self.btn_start.clicked.connect(self._toggle)
-        self.btn_reset = ghost_btn("↺  Reiniciar", w=140, h=46)
+        self.btn_reset = ghost_btn("↺  Reiniciar", w=140, h=44)
         self.btn_reset.clicked.connect(self._reset)
+        self.btn_saltar_descanso = primary_btn("▶  Continuar estudio", w=190, h=44)
+        self.btn_saltar_descanso.clicked.connect(self._saltar_descanso)
+        self.btn_saltar_descanso.setVisible(False)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_reset)
+        btn_row.addWidget(self.btn_saltar_descanso)
         cl.addLayout(btn_row)
-        cl.addSpacing(26)
+        cl.addSpacing(16)
 
-        # Config tiempo
+        # Config minutos
         self.cfg_frame = QFrame()
         self.cfg_frame.setStyleSheet(f"""
-            QFrame {{
-                background: {c("surface2")};
-                border: 1px solid {c("border")};
-                border-radius: 12px;
-            }}
+            QFrame {{ background: {c("surface2")}; border: 1px solid {c("border")}; border-radius: 12px; }}
         """)
         cfg_lay = QHBoxLayout(self.cfg_frame)
         cfg_lay.setContentsMargins(18, 10, 18, 10)
         cfg_lay.setSpacing(10)
-        cfg_lay.addWidget(make_label("Minutos:", 13, color_key="text2"))
+        cfg_lay.addWidget(make_label("📚 Estudio:", 13, color_key="text2"))
         self.entry_min = QLineEdit("25")
-        self.entry_min.setFixedSize(60, 34)
+        self.entry_min.setFixedSize(52, 34)
         self.entry_min.setAlignment(Qt.AlignmentFlag.AlignCenter)
         set_font(self.entry_min, 13)
         self._style_entry(self.entry_min)
         cfg_lay.addWidget(self.entry_min)
-        self.btn_apply = primary_btn("Aplicar", w=80, h=34)
+        cfg_lay.addWidget(make_label("min   ☕ Descanso:", 13, color_key="text2"))
+        self.entry_descanso = QLineEdit("5")
+        self.entry_descanso.setFixedSize(52, 34)
+        self.entry_descanso.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        set_font(self.entry_descanso, 13)
+        self._style_entry(self.entry_descanso)
+        cfg_lay.addWidget(self.entry_descanso)
+        cfg_lay.addWidget(make_label("min", 13, color_key="text2"))
+        self.btn_apply = primary_btn("Aplicar", w=110, h=34)
         self.btn_apply.clicked.connect(self._apply_time)
         cfg_lay.addWidget(self.btn_apply)
         cl.addWidget(self.cfg_frame, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         vbox.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # ── Card música ─────────────────────────────────────────
+        self.card_musica = Card()
+        self.card_musica.setMaximumWidth(900)
+        cm = QVBoxLayout(self.card_musica)
+        cm.setContentsMargins(32, 22, 32, 22)
+        cm.setSpacing(12)
+
+        cm.addWidget(make_label("🎵  Música de fondo", 14, bold=True))
+
+        # Fila 1: carpeta + archivo suelto + combo
+        fila_musica = QHBoxLayout()
+        fila_musica.setSpacing(8)
+        self.btn_elegir_musica = ghost_btn("📁  Carpeta", w=140, h=40)
+        self.btn_elegir_musica.clicked.connect(self._elegir_carpeta_musica)
+        fila_musica.addWidget(self.btn_elegir_musica)
+        self.btn_subir_archivo = ghost_btn("🎵  Archivo", w=140, h=40)
+        self.btn_subir_archivo.clicked.connect(self._subir_archivo_musica)
+        fila_musica.addWidget(self.btn_subir_archivo)
+        self.combo_musica = QComboBox()
+        self.combo_musica.setMinimumWidth(180)
+        self.combo_musica.setFixedHeight(36)
+        self._style_combo_musica()
+        self.combo_musica.addItem("— sin canciones —")
+        self.combo_musica.currentIndexChanged.connect(self._cambiar_cancion)
+        fila_musica.addWidget(self.combo_musica, stretch=1)
+        cm.addLayout(fila_musica)
+
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(10)
+        ctrl_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.btn_play_pause_music = ghost_btn("▶", w=54, h=42)
+        self.btn_prev_music  = ghost_btn("⏮", w=54, h=42)
+        self.btn_next_music  = ghost_btn("⏭", w=54, h=42)
+        self.btn_play_pause_music.clicked.connect(self._music_toggle)
+        self.btn_prev_music.clicked.connect(self._music_prev)
+        self.btn_next_music.clicked.connect(self._music_next)
+        for b in (self.btn_prev_music, self.btn_play_pause_music, self.btn_next_music):
+            ctrl_row.addWidget(b)
+        self.lbl_cancion_actual = make_label("Sin reproducción", 11, color_key="text2")
+        self.lbl_cancion_actual.setWordWrap(True)
+        ctrl_row.addWidget(self.lbl_cancion_actual, stretch=1)
+        cm.addLayout(ctrl_row)
+
+        vol_row = QHBoxLayout()
+        vol_row.setSpacing(8)
+        vol_row.addWidget(make_label("🔊", 13))
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(60)
+        self.slider_vol.setFixedWidth(160)
+        self._style_slider()
+        self.slider_vol.valueChanged.connect(self._cambiar_volumen)
+        vol_row.addWidget(self.slider_vol)
+        self.lbl_vol = make_label("60%", 11, color_key="text2")
+        vol_row.addWidget(self.lbl_vol)
+        vol_row.addStretch()
+        cm.addLayout(vol_row)
+
+        vbox.addWidget(self.card_musica, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
         FadeIn(self.bg_widget)
+        self._actualizar_reloj()
+        self._init_player()
 
-    def _style_entry(self, w):
-        w.setStyleSheet(f"""
-            QLineEdit {{
-                background: {c("surface")};
-                color: {c("text")};
-                border: 1px solid {c("border")};
-                border-radius: 8px;
-                padding: 2px 6px;
-            }}
-            QLineEdit:focus {{ border-color: {c("primary")}; }}
-        """)
+    # ─────────────────────────────────────────────────────────────
+    def _actualizar_reloj(self):
+        from datetime import datetime
+        self.lbl_hora_actual.setText(f"🕐  {datetime.now().strftime('%H:%M:%S')}")
 
+    # ── Estudio ──────────────────────────────────────────────────
     def _toggle(self):
         if not self._corriendo:
             self._corriendo = True
@@ -600,48 +794,15 @@ class PomodoroPanel(QWidget):
             self.btn_start.setText("  ⏸  Pausar")
             style_primary(self.btn_start, danger=True)
             self.lbl_estado.setText("En sesión de enfoque…")
+            if self._playlist:
+                self._music_play()
         else:
             self._corriendo = False
             self._timer.stop()
             self.btn_start.setText("  ▶  Reanudar")
             style_primary(self.btn_start, danger=False)
             self.lbl_estado.setText("En pausa")
-
-    # ── Sonido al terminar la sesión ───────────────────────────────────────
-    def _reproducir_sonido_fin(self):
-        """Reproduce un beep/sonido de notificación al terminar el Pomodoro.
-        Usa winsound en Windows, afplay en macOS, o paplay/aplay en Linux.
-        Si ninguno está disponible, hace fallback a QApplication.beep()."""
-        import threading, subprocess, platform
-        def _play():
-            sistema = platform.system()
-            try:
-                if sistema == "Windows":
-                    import winsound
-                    # Tres beeps cortos: frecuencia 880 Hz, 200 ms cada uno
-                    for _ in range(3):
-                        winsound.Beep(880, 200)
-                        import time; time.sleep(0.1)
-                elif sistema == "Darwin":
-                    subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"],
-                                   timeout=5, capture_output=True)
-                else:  # Linux
-                    # Intenta paplay (PulseAudio) con un beep generado inline
-                    result = subprocess.run(
-                        ["python3", "-c",
-                         "import os; [os.system('pactl play-sample bell 2>/dev/null || "
-                         "paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null || "
-                         "aplay /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null') for _ in range(1)]"],
-                        timeout=5, capture_output=True
-                    )
-            except Exception:
-                pass
-            # Fallback universal: beep del sistema via Qt (hilo principal)
-            from PyQt6.QtWidgets import QApplication
-            QApplication.beep()
-        threading.Thread(target=_play, daemon=True).start()
-        # Siempre hacer también el beep Qt inmediato (sin bloquear)
-        QApplication.beep()
+            self._music_pause()
 
     def _tick(self):
         if self._segundos > 0:
@@ -652,114 +813,361 @@ class PomodoroPanel(QWidget):
         else:
             self._timer.stop()
             self._corriendo = False
+            self._music_pause()
+            self._reproducir_sonido_fin()
+            self.cerebro.guardar_pomodoro(self._tiempo_inicial // 60)
+            self._actualizar_estadisticas()
             self.btn_start.setText("  ▶  Iniciar")
             style_primary(self.btn_start, danger=False)
-
-            self._reproducir_sonido_fin()  # 🔔 Sonido de fin de sesión
-
-            minutos_reales = self._tiempo_inicial // 60
-            self.cerebro.guardar_pomodoro(minutos_reales)
-            self._actualizar_estadisticas()
-
             self.btn_start.setEnabled(False)
-            self.lbl_estado.setText("✓ ¡Sesión lista! Reinicia para continuar")
+            self.lbl_estado.setText("✓ ¡Sesión completa!")
+            self._iniciar_descanso()
 
     def _reset(self):
+        if self._en_descanso:
+            self._registrar_descanso_transcurrido()
         self._timer.stop()
-        self._corriendo = False
-        self._segundos = self._tiempo_inicial
+        self._timer_descanso.stop()
+        self._corriendo    = False
+        self._en_descanso  = False
+        self._segundos     = self._tiempo_inicial
+        self._seg_descanso = self.DESCANSO_SEG
+        self._descanso_registrado = True
         m = self._tiempo_inicial // 60
         self.lbl_clock.setText(f"{m:02d}:00")
         self.ring.set_fraction(1.0)
+        m_d, s_d = divmod(self.DESCANSO_SEG, 60)
+        self.lbl_descanso_clock.setText(f"{m_d:02d}:{s_d:02d}")
+        self.ring_descanso.set_fraction(1.0)
+        self.ring_descanso.set_color("#555566")
+        self.lbl_titulo_descanso.setStyleSheet(f"color: {c('text3')}; background: transparent; border: none;")
+        self.lbl_descanso_clock.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
+        self.lbl_descanso_estado.setText("Espera tu descanso")
         self.btn_start.setText("  ▶  Iniciar")
         style_primary(self.btn_start, danger=False)
-        self.lbl_estado.setText("Listo para comenzar")
         self.btn_start.setEnabled(True)
+        self.btn_saltar_descanso.setVisible(False)
+        self.lbl_estado.setText("Listo para comenzar")
+        self._music_pause()
 
     def _apply_time(self):
         try:
             mins = int(self.entry_min.text())
+            mins_descanso = int(self.entry_descanso.text())
             if mins > 0:
                 self._tiempo_inicial = mins * 60
-                self._segundos = self._tiempo_inicial
-                self.lbl_clock.setText(f"{mins:02d}:00")
-                self.ring.set_fraction(1.0)
-                self._timer.stop()
-                self._corriendo = False
-                self.btn_start.setText("  ▶  Iniciar")
-                style_primary(self.btn_start, danger=False)
-                self.lbl_estado.setText("Listo para comenzar")
-                self.btn_start.setEnabled(True)
+            if mins_descanso > 0:
+                self.DESCANSO_SEG = mins_descanso * 60
+            self._reset()   # _reset ya usa self.DESCANSO_SEG para actualizar el label
         except ValueError:
             pass
+
+    # ── Descanso ─────────────────────────────────────────────────
+    def _iniciar_descanso(self):
+        self._en_descanso  = True
+        self._seg_descanso = self.DESCANSO_SEG
+        self._descanso_registrado = False
+        self.ring_descanso.set_fraction(1.0)
+        self.ring_descanso.set_color("#5B9BD5")   # azul suave = activo
+        self.lbl_titulo_descanso.setStyleSheet(f"color: {c('primary')}; background: transparent; border: none;")
+        self.lbl_descanso_clock.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+        self.lbl_descanso_estado.setText("☕ Descansa — música pausada")
+        self.btn_saltar_descanso.setVisible(True)
+        self._timer_descanso.start()
+
+    def _tick_descanso(self):
+        if self._seg_descanso > 0:
+            self._seg_descanso -= 1
+            m, s = divmod(self._seg_descanso, 60)
+            self.lbl_descanso_clock.setText(f"{m:02d}:{s:02d}")
+            self.ring_descanso.set_fraction(self._seg_descanso / self.DESCANSO_SEG)
+        else:
+            self._timer_descanso.stop()
+            self.lbl_descanso_estado.setText("⏰ ¡Descanso listo! ¿Continúas?")
+            self.lbl_descanso_clock.setText("00:00")
+            # El descanso se completó entero: lo registramos ya mismo, sin
+            # esperar a que el usuario presione "Continuar estudio". Así,
+            # si guarda las estadísticas justo en este momento, el
+            # descanso ya cuenta.
+            self._registrar_descanso_transcurrido()
+
+    def _registrar_descanso_transcurrido(self):
+        """Guarda en el acumulador el descanso realmente transcurrido
+        (completo o interrumpido) y evita registrarlo dos veces."""
+        if self._descanso_registrado:
+            return
+        segundos_transcurridos = self.DESCANSO_SEG - self._seg_descanso
+        minutos_descanso = segundos_transcurridos // 60
+        if minutos_descanso > 0:
+            self.cerebro.guardar_descanso(minutos_descanso)
+            self._actualizar_estadisticas()
+        self._descanso_registrado = True
+
+    def _saltar_descanso(self):
+        self._timer_descanso.stop()
+        self._en_descanso = False
+        self.btn_saltar_descanso.setVisible(False)
+
+        # Guardar el tiempo de descanso realmente transcurrido, salvo que ya
+        # se haya registrado (por ejemplo, si el descanso terminó solo).
+        self._registrar_descanso_transcurrido()
+
+        self._segundos = self._tiempo_inicial
+        m = self._tiempo_inicial // 60
+        self.lbl_clock.setText(f"{m:02d}:00")
+        self.ring.set_fraction(1.0)
+        self.ring_descanso.set_fraction(1.0)
+        self.ring_descanso.set_color("#555566")
+        self.lbl_titulo_descanso.setStyleSheet(f"color: {c('text3')}; background: transparent; border: none;")
+        self.lbl_descanso_clock.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
+        self.lbl_descanso_estado.setText("Espera tu descanso")
+        m_d2, s_d2 = divmod(self.DESCANSO_SEG, 60)
+        self.lbl_descanso_clock.setText(f"{m_d2:02d}:{s_d2:02d}")
+        self.btn_start.setEnabled(True)
+        self.btn_start.setText("  ▶  Iniciar")
+        style_primary(self.btn_start, danger=False)
+        self.lbl_estado.setText("Listo para comenzar")
+
+    # ── Música ───────────────────────────────────────────────────
+    def _init_player(self):
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+            self._audio_output = QAudioOutput()
+            self._player = QMediaPlayer()
+            self._player.setAudioOutput(self._audio_output)
+            self._audio_output.setVolume(0.6)
+            self._player.mediaStatusChanged.connect(self._on_media_status)
+            self._player.playbackStateChanged.connect(self._actualizar_boton_play_pause)
+        except Exception:
+            self._player = None
+
+    def _elegir_carpeta_musica(self):
+        carpeta = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de música")
+        if not carpeta:
+            return
+        exts = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
+        nuevas = sorted(
+            [p for p in Path(carpeta).iterdir() if p.suffix.lower() in exts],
+            key=lambda p: p.name
+        )
+        if not nuevas:
+            self.lbl_cancion_actual.setText("No se encontraron archivos de audio")
+            return
+        self._agregar_a_playlist(nuevas)
+
+    def _subir_archivo_musica(self):
+        """Permite seleccionar uno o varios archivos de audio sueltos."""
+        rutas, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar archivo(s) de música", "",
+            "Audio (*.mp3 *.wav *.ogg *.flac *.m4a *.aac)"
+        )
+        if not rutas:
+            return
+        self._agregar_a_playlist([Path(r) for r in rutas])
+
+    def _agregar_a_playlist(self, paths: list):
+        """Agrega rutas a la playlist y actualiza el combo."""
+        # Evitar duplicados
+        existentes = {str(p) for p in self._playlist}
+        nuevas = [p for p in paths if str(p) not in existentes]
+        self._playlist.extend(nuevas)
+        self.combo_musica.blockSignals(True)
+        self.combo_musica.clear()
+        for p in self._playlist:
+            self.combo_musica.addItem(p.name)
+        self.combo_musica.blockSignals(False)
+        if nuevas:
+            # Seleccionar la primera nueva
+            idx = self._playlist.index(nuevas[0])
+            self.combo_musica.setCurrentIndex(idx)
+            self._cargar_cancion(idx)
+
+    def _cargar_cancion(self, idx):
+        if not self._player or idx < 0 or idx >= len(self._playlist):
+            return
+        from PyQt6.QtCore import QUrl
+        self._player.setSource(QUrl.fromLocalFile(str(self._playlist[idx])))
+        self.lbl_cancion_actual.setText(self._playlist[idx].name)
+        self._player.play()
+
+    def _cambiar_cancion(self, idx):
+        if self._playlist:
+            self._cargar_cancion(idx)
+
+    def _music_toggle(self):
+        if not self._player:
+            return
+        from PyQt6.QtMultimedia import QMediaPlayer
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._music_pause()
+        else:
+            self._music_play()
+
+    def _actualizar_boton_play_pause(self, _state=None):
+        if not self._player:
+            return
+        from PyQt6.QtMultimedia import QMediaPlayer
+        en_reproduccion = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.btn_play_pause_music.setText("⏸" if en_reproduccion else "▶")
+
+    def _music_play(self):
+        if self._player and self._playlist:
+            self._player.play()
+
+    def _music_pause(self):
+        if self._player:
+            self._player.pause()
+
+    def _music_prev(self):
+        if not self._playlist: return
+        idx = max(0, self.combo_musica.currentIndex() - 1)
+        self.combo_musica.setCurrentIndex(idx)
+
+    def _music_next(self):
+        if not self._playlist: return
+        idx = (self.combo_musica.currentIndex() + 1) % len(self._playlist)
+        self.combo_musica.setCurrentIndex(idx)
+
+    def _cambiar_volumen(self, val):
+        self.lbl_vol.setText(f"{val}%")
+        if self._player:
+            self._audio_output.setVolume(val / 100)
+
+    def _on_media_status(self, status):
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer
+            if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                self._music_next()
+        except Exception:
+            pass
+
+    def _reproducir_sonido_fin(self):
+        import threading, platform
+        def _play():
+            try:
+                if platform.system() == "Windows":
+                    import winsound
+                    for _ in range(3):
+                        winsound.Beep(880, 200)
+                        import time; time.sleep(0.1)
+            except Exception:
+                pass
+            QApplication.beep()
+        threading.Thread(target=_play, daemon=True).start()
+
+    # ── Estadísticas ─────────────────────────────────────────────
+    def _actualizar_estadisticas(self):
+        try:
+            self.lbl_horas.setText(f"Tiempo enfocado: {self.cerebro.obtener_texto_estadisticas()}")
+        except Exception:
+            self.lbl_horas.setText("Tiempo enfocado: 0 h 0 min")
+
+    def _borrar_estadisticas(self):
+        # Si hay un descanso en curso (aún contando) que todavía no se
+        # registró, sumamos el tiempo transcurrido hasta ahora antes de
+        # guardar o borrar, para no perderlo.
+        if self._en_descanso:
+            self._registrar_descanso_transcurrido()
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Historial de Enfoque")
+        box.setText("¿Desea guardar el tiempo acumulado como sesión oficial?")
+        box.setIcon(QMessageBox.Icon.Question)
+        btn_si      = box.addButton("  Sí, guardar  ",            QMessageBox.ButtonRole.YesRole)
+        btn_no      = box.addButton("  No, borrar sin guardar  ", QMessageBox.ButtonRole.NoRole)
+        _btn_cancel = box.addButton("  Cancelar  ",               QMessageBox.ButtonRole.RejectRole)
+        box.setStyleSheet(f"""
+            QMessageBox {{ background: {c('surface')}; color: {c('text')}; }}
+            QLabel {{ color: {c('text')}; background: transparent; font-size: 13px; }}
+            QPushButton {{
+                background: {c('surface2')}; color: {c('text')};
+                border: 1px solid {c('border')}; border-radius: 8px;
+                padding: 6px 18px; font-size: 13px; min-width: 80px;
+            }}
+            QPushButton:hover {{ background: {c('primary_t')}; border-color: {c('primary')}; }}
+        """)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_si:
+            exito = self.cerebro.consolidar_sesion_actual()
+            self.lbl_estado.setText("✓ ¡Sesión guardada!" if exito else "No hay tiempo suficiente")
+            if exito:
+                self.sesion_guardada.emit()
+            self._actualizar_estadisticas()
+        elif clicked == btn_no:
+            self.cerebro.borrar_historial_pomodoro()
+            self._actualizar_estadisticas()
+            self.lbl_estado.setText("Tiempo temporal reiniciado")
+
+    # ── Estilos ───────────────────────────────────────────────────
+    def _style_entry(self, w):
+        w.setStyleSheet(f"""
+            QLineEdit {{
+                background: {c("surface")}; color: {c("text")};
+                border: 1px solid {c("border")}; border-radius: 8px; padding: 2px 6px;
+            }}
+            QLineEdit:focus {{ border-color: {c("primary")}; }}
+        """)
+
+    def _style_combo_musica(self):
+        self.combo_musica.setStyleSheet(f"""
+            QComboBox {{
+                background: {c("surface2")}; color: {c("text")};
+                border: 1px solid {c("border")}; border-radius: 8px;
+                padding: 4px 10px; font-size: 12px;
+            }}
+            QComboBox::drop-down {{ border: none; width: 24px; }}
+            QComboBox QAbstractItemView {{
+                background: {c("surface")}; color: {c("text")};
+                border: 1px solid {c("border")}; selection-background-color: {c("primary_t")};
+            }}
+        """)
+
+    def _style_slider(self):
+        self.slider_vol.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                background: {c('border')}; height: 4px; border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {c('primary')}; width: 14px; height: 14px;
+                border-radius: 7px; margin: -5px 0;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {c('primary')}; border-radius: 2px;
+            }}
+        """)
 
     def refresh_theme(self):
         self.setStyleSheet(f"background: {c('bg')};")
         self.bg_widget.setStyleSheet(f"background: {c('bg')};")
         self.header.refresh()
         self.card.refresh()
+        self.card_musica.refresh()
         self.lbl_clock.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+        self.lbl_hora_actual.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
         self.lbl_estado.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
         self.ring.update()
+        self.ring_descanso.update()
         style_primary(self.btn_start)
         style_ghost(self.btn_reset)
         style_primary(self.btn_apply)
+        style_primary(self.btn_saltar_descanso)
+        style_ghost(self.btn_elegir_musica)
+        style_ghost(self.btn_play_pause_music)
+        style_ghost(self.btn_prev_music)
+        style_ghost(self.btn_next_music)
         self._style_entry(self.entry_min)
+        self._style_entry(self.entry_descanso)
+        style_ghost(self.btn_subir_archivo)
+        self._style_combo_musica()
+        self._style_slider()
         self.btn_borrar_stat.setStyleSheet(
             f"color: {c('danger')}; background: transparent; border: none; font-size: 15px;"
         )
         self.cfg_frame.setStyleSheet(f"""
-            QFrame {{
-                background: {c("surface2")};
-                border: 1px solid {c("border")};
-                border-radius: 12px;
-            }}
+            QFrame {{ background: {c("surface2")}; border: 1px solid {c("border")}; border-radius: 12px; }}
         """)
-        for lbl in self.cfg_frame.findChildren(QLabel):
-            lbl.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
 
-    def _actualizar_estadisticas(self):
-        """Pide al cerebro el texto en formato horas/minutos y lo pinta."""
-        try:
-            texto_tiempo = self.cerebro.obtener_texto_estadisticas()
-            self.lbl_horas.setText(f"Tiempo enfocado: {texto_tiempo}")
-        except AttributeError:
-            self.lbl_horas.setText("Tiempo enfocado: 0 h 0 min")
-
-    def _borrar_estadisticas(self):
-        """Pregunta al usuario si desea guardar el acumulado como sesión oficial."""
-        from PyQt6.QtWidgets import QMessageBox
-
-        box = QMessageBox(self)
-
-        box.setStyleSheet(_msgbox_style())
-        box.setWindowTitle("Historial de Enfoque")
-        box.setText(
-            "¿Desea guardar este tiempo acumulado de concentración\n"
-            "como una sesión oficial?"
-        )
-        box.setIcon(QMessageBox.Icon.Question)
-
-        btn_si      = box.addButton("  Sí, guardar  ",           QMessageBox.ButtonRole.YesRole)
-        btn_no      = box.addButton("  No, borrar sin guardar  ", QMessageBox.ButtonRole.NoRole)
-        _btn_cancel = box.addButton("  Cancelar  ",              QMessageBox.ButtonRole.RejectRole)
-
-        box.exec()
-        clicked = box.clickedButton()
-
-        if clicked == btn_si:
-            exito = self.cerebro.consolidar_sesion_actual()
-            if exito:
-                self.lbl_estado.setText("✓ ¡Sesión guardada con éxito!")
-                self.sesion_guardada.emit()   # notifica al panel de estadísticas
-            else:
-                self.lbl_estado.setText("No hay tiempo suficiente para guardar")
-            self._actualizar_estadisticas()
-
-        elif clicked == btn_no:
-            self.cerebro.borrar_historial_pomodoro()
-            self._actualizar_estadisticas()
-            self.lbl_estado.setText("Tiempo temporal reiniciado a cero")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3246,12 +3654,19 @@ class EstadisticasPanel(QWidget):
             except _stats_lib.StatisticsError:
                 moda_str = "multimodal"
 
+            valores_descanso = [s.get("minutos_descanso", 0) for s in sessions]
+            total_descanso   = sum(valores_descanso)
+            media_descanso   = _stats_lib.mean(valores_descanso) if valores_descanso else 0.0
+            h_desc, m_desc   = divmod(total_descanso, 60)
+
             h_total, m_total = divmod(total, 60)
             linea1 = (f"Sesiones: {n}   |   Media: {media:.1f} min   |   "
                       f"Desv. estándar: {desvio:.1f} min   |   Moda: {moda_str}")
             linea2 = (f"Varianza: {varian:.1f}   |   Mínimo: {minimo} min   |   "
-                      f"Máximo: {maximo} min   |   Total: {h_total} h {m_total} min")
-            self.lbl_stats.setText(f"{linea1}\n{linea2}")
+                      f"Máximo: {maximo} min   |   Total enfocado: {h_total} h {m_total} min")
+            linea3 = (f"☕ Descanso total: {h_desc} h {m_desc} min   |   "
+                      f"Media de descanso: {media_descanso:.1f} min/sesión")
+            self.lbl_stats.setText(f"{linea1}\n{linea2}\n{linea3}")
 
         # ── Lista de sesiones ─────────────────────────────────────────────────
         # Limpiar filas anteriores
@@ -3295,12 +3710,20 @@ class EstadisticasPanel(QWidget):
         lbl_name = make_label(session["nombre"], 13)
         lay.addWidget(lbl_name, stretch=1)
 
-        # Duración
+        # Duración (estudio)
         h, m = divmod(session["minutos"], 60)
         dur_str = f"{h}h {m}min" if h > 0 else f"{m} min"
-        lbl_time = make_label(dur_str, 13, color_key="text2")
-        lbl_time.setFixedWidth(76)
+        lbl_time = make_label(f"📚 {dur_str}", 13, color_key="text2")
+        lbl_time.setFixedWidth(88)
         lay.addWidget(lbl_time)
+
+        # Duración (descanso)
+        min_descanso = session.get("minutos_descanso", 0)
+        h_d, m_d = divmod(min_descanso, 60)
+        desc_str = f"{h_d}h {m_d}min" if h_d > 0 else f"{m_d} min"
+        lbl_descanso = make_label(f"☕ {desc_str}", 13, color_key="text2")
+        lbl_descanso.setFixedWidth(88)
+        lay.addWidget(lbl_descanso)
 
         # Fecha (solo la parte de la fecha, sin hora)
         fecha_raw = session.get("fecha", "")
@@ -3368,6 +3791,330 @@ class EstadisticasPanel(QWidget):
 #  VENTANA PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _formatear_respuesta_ia(texto: str) -> str:
+    """
+    Convierte el texto plano que devuelve el Asistente IA (ya sin LaTeX,
+    ver core/groq_assistant.limpiar_formato_ia) en HTML simple apto para
+    un QLabel. Solo interpreta lo mínimo indispensable para que se lea
+    bien: **negrita** y viñetas con "-". No agrega colores, iconos ni
+    nada que el usuario no haya pedido.
+    """
+    import re as _re
+    import html as html_lib
+
+    texto = html_lib.escape(texto)
+
+    # Encabezados "### Texto" -> negrita (sin agregar tamaños ni iconos extra)
+    texto = _re.sub(r"^\s{0,3}#{1,6}\s*(.+)$", r"<b>\1</b>", texto, flags=_re.MULTILINE)
+
+    # **negrita** -> <b>negrita</b>
+    texto = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", texto)
+
+    # Líneas "- algo" -> "• algo"
+    lineas = texto.split("\n")
+    lineas = [_re.sub(r"^(\s*)-\s+", r"\1• ", ln) for ln in lineas]
+    texto = "\n".join(lineas)
+
+    return texto.replace("\n", "<br>")
+
+
+class AIWorker(QObject):
+    """Ejecuta la consulta a Groq (con búsqueda web previa) en un QThread
+    para no congelar la interfaz mientras se espera la respuesta de red."""
+    terminado = pyqtSignal(dict)   # {"respuesta": str, "fuentes": [ {titulo,url,resumen}, ... ]}
+    error     = pyqtSignal(str)
+
+    def __init__(self, pregunta: str):
+        super().__init__()
+        self._pregunta = pregunta
+
+    def run(self):
+        try:
+            resultado = _ia_responder_con_busqueda(self._pregunta)
+            self.terminado.emit(resultado)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PANEL: Asistente IA (Groq + búsqueda web real)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AsistenteIAPanel(QWidget):
+    """
+    Chat con IA (Groq) que primero busca en internet (DuckDuckGo) y luego
+    responde citando fuentes. Los enlaces mostrados son URLs reales de las
+    páginas web encontradas (no redirects de un buscador): se pueden abrir
+    directamente en el navegador predeterminado del usuario.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hilo = None
+        self._worker = None
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.header = SectionHeader("Asistente IA")
+        root.addWidget(self.header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background: transparent; border: none;")
+
+        self.bg_widget = QWidget()
+        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
+        vbox = QVBoxLayout(self.bg_widget)
+        vbox.setContentsMargins(60, 36, 60, 36)
+        vbox.setSpacing(20)
+        vbox.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # ── Card de pregunta ──────────────────────────────────────
+        self.card_search = Card()
+        cl = QVBoxLayout(self.card_search)
+        cl.setContentsMargins(40, 32, 40, 32)
+        cl.setSpacing(0)
+
+        self.lbl_titulo = make_label("Pregúntale a la IA (con búsqueda en internet)", 14, bold=True)
+        cl.addWidget(self.lbl_titulo)
+        cl.addSpacing(6)
+
+        lbl_sub = make_label(
+            "La IA (Groq) busca en la web y responde citando sus fuentes, "
+            "con enlaces reales que puedes abrir en tu navegador.",
+            12, color_key="text2"
+        )
+        lbl_sub.setWordWrap(True)
+        cl.addWidget(lbl_sub)
+        cl.addSpacing(20)
+
+        self.search_frame = QFrame()
+        self.search_frame.setFixedHeight(52)
+        self._style_search_frame()
+        sf_lay = QHBoxLayout(self.search_frame)
+        sf_lay.setContentsMargins(18, 0, 10, 0)
+        sf_lay.setSpacing(8)
+
+        self.lbl_icono = QLabel("💬")
+        set_font(self.lbl_icono, 16)
+        self.lbl_icono.setStyleSheet(f"background: transparent; border: none; color: {c('text2')};")
+        sf_lay.addWidget(self.lbl_icono)
+
+        self.entry_pregunta = QLineEdit()
+        self.entry_pregunta.setPlaceholderText("Escribe tu pregunta…")
+        set_font(self.entry_pregunta, 14)
+        self.entry_pregunta.returnPressed.connect(self._preguntar)
+        self._style_search_entry()
+        sf_lay.addWidget(self.entry_pregunta)
+
+        self.btn_preguntar = primary_btn("Preguntar", w=110, h=38)
+        self.btn_preguntar.clicked.connect(self._preguntar)
+        sf_lay.addWidget(self.btn_preguntar)
+        cl.addWidget(self.search_frame)
+
+        vbox.addWidget(self.card_search)
+
+        if not _HAS_IA:
+            self.lbl_estado = make_label(
+                "⚠️  Falta instalar 'requests' (pip install requests) para usar el Asistente IA.",
+                13, color_key="danger"
+            )
+        else:
+            self.lbl_estado = make_label("", 13, color_key="text2")
+        self.lbl_estado.setWordWrap(True)
+        vbox.addWidget(self.lbl_estado)
+
+        # ── Card de respuesta ────────────────────────────────────
+        self.card_respuesta = Card()
+        self.card_respuesta.setVisible(False)
+        rl = QVBoxLayout(self.card_respuesta)
+        rl.setContentsMargins(30, 24, 30, 24)
+        rl.setSpacing(10)
+
+        self.lbl_respuesta = QLabel("")
+        self.lbl_respuesta.setWordWrap(True)
+        self.lbl_respuesta.setTextFormat(Qt.TextFormat.RichText)
+        set_font(self.lbl_respuesta, 13)
+        self.lbl_respuesta.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+        rl.addWidget(self.lbl_respuesta)
+
+        vbox.addWidget(self.card_respuesta)
+
+        self.lbl_fuentes_titulo = make_label("Fuentes (páginas web reales)", 12, bold=True, color_key="text2")
+        self.lbl_fuentes_titulo.setVisible(False)
+        vbox.addWidget(self.lbl_fuentes_titulo)
+
+        self.fuentes_widget = QWidget()
+        self.fuentes_widget.setStyleSheet("background: transparent;")
+        self.fuentes_vlay = QVBoxLayout(self.fuentes_widget)
+        self.fuentes_vlay.setContentsMargins(0, 0, 0, 0)
+        self.fuentes_vlay.setSpacing(8)
+        self.fuentes_vlay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        vbox.addWidget(self.fuentes_widget)
+
+        scroll.setWidget(self.bg_widget)
+        root.addWidget(scroll)
+        FadeIn(self.bg_widget)
+
+    # ── Lógica ────────────────────────────────────────────────────
+    def _preguntar(self):
+        if not _HAS_IA:
+            return
+
+        pregunta = self.entry_pregunta.text().strip()
+        if not pregunta:
+            return
+
+        self.btn_preguntar.setEnabled(False)
+        self.entry_pregunta.setEnabled(False)
+        self.lbl_estado.setText("⏳  Buscando en internet y consultando a la IA…")
+        self.lbl_estado.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none; font-size: 13px;")
+        self.card_respuesta.setVisible(False)
+        self.lbl_fuentes_titulo.setVisible(False)
+        self._limpiar_fuentes()
+        QApplication.processEvents()
+
+        self._worker = AIWorker(pregunta)
+        self._hilo = QThread()
+        self._worker.moveToThread(self._hilo)
+        self._hilo.started.connect(self._worker.run)
+        self._worker.terminado.connect(self._on_respuesta)
+        self._worker.error.connect(self._on_error)
+        self._hilo.start()
+
+    def _on_respuesta(self, resultado: dict):
+        self._finalizar_hilo()
+        self.btn_preguntar.setEnabled(True)
+        self.entry_pregunta.setEnabled(True)
+
+        fuentes   = resultado.get("fuentes", [])
+        respuesta = resultado.get("respuesta", "")
+
+        if fuentes:
+            self.lbl_estado.setText(f"✦  Respuesta generada con {len(fuentes)} fuente(s) reales de internet")
+            self.lbl_estado.setStyleSheet(f"color: {c('primary')}; background: transparent; border: none; font-size: 13px;")
+        else:
+            self.lbl_estado.setText("⚠️  No se encontraron páginas web para esta consulta; respuesta generada solo con el conocimiento del modelo")
+            self.lbl_estado.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none; font-size: 13px;")
+
+        self.lbl_respuesta.setText(_formatear_respuesta_ia(respuesta))
+        self.card_respuesta.setVisible(True)
+
+        self._limpiar_fuentes()
+        if fuentes:
+            self.lbl_fuentes_titulo.setVisible(True)
+            for i, f in enumerate(fuentes, 1):
+                self.fuentes_vlay.addWidget(self._make_fuente_card(i, f))
+
+    def _on_error(self, mensaje: str):
+        self._finalizar_hilo()
+        self.btn_preguntar.setEnabled(True)
+        self.entry_pregunta.setEnabled(True)
+        self.lbl_estado.setText(f"❌  {mensaje}")
+        self.lbl_estado.setStyleSheet(f"color: {c('danger')}; background: transparent; border: none; font-size: 13px;")
+        self.card_respuesta.setVisible(False)
+
+    def _finalizar_hilo(self):
+        if self._hilo:
+            self._hilo.quit()
+            self._hilo.wait()
+        self._hilo = None
+        self._worker = None
+
+    def _limpiar_fuentes(self):
+        while self.fuentes_vlay.count():
+            item = self.fuentes_vlay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _make_fuente_card(self, rank: int, fuente: dict) -> QFrame:
+        """Tarjeta con el enlace REAL de la página web encontrada (no un
+        redirect del buscador): se abre en el navegador predeterminado
+        del sistema al hacer clic, gracias a setOpenExternalLinks(True)."""
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {c('surface')};
+                border: 1px solid {c('border')};
+                border-radius: 10px;
+            }}
+        """)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(4)
+
+        import html as html_lib
+        titulo  = html_lib.escape(fuente.get("titulo", ""))
+        url     = fuente.get("url", "")
+        resumen = html_lib.escape(fuente.get("resumen", ""))
+
+        lbl_link = QLabel(
+            f'<a href="{html_lib.escape(url)}" style="color:{c("primary")}; text-decoration:none;">'
+            f'[{rank}] {titulo}</a>'
+        )
+        lbl_link.setTextFormat(Qt.TextFormat.RichText)
+        lbl_link.setOpenExternalLinks(True)
+        lbl_link.setWordWrap(True)
+        set_font(lbl_link, 13, bold=True)
+        lbl_link.setStyleSheet("background: transparent; border: none;")
+        lay.addWidget(lbl_link)
+
+        lbl_url = QLabel(html_lib.escape(url))
+        lbl_url.setWordWrap(True)
+        set_font(lbl_url, 11)
+        lbl_url.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
+        lay.addWidget(lbl_url)
+
+        if resumen:
+            lbl_resumen = QLabel(resumen)
+            lbl_resumen.setWordWrap(True)
+            set_font(lbl_resumen, 12)
+            lbl_resumen.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+            lay.addWidget(lbl_resumen)
+
+        return card
+
+    # ── Estilos ───────────────────────────────────────────────────
+    def _style_search_frame(self):
+        self.search_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {c("surface2")};
+                border: 1.5px solid {c("border")};
+                border-radius: 26px;
+            }}
+        """)
+
+    def _style_search_entry(self):
+        self.entry_pregunta.setStyleSheet(f"""
+            QLineEdit {{
+                background: transparent;
+                color: {c("text")};
+                border: none;
+                padding: 0;
+            }}
+        """)
+
+    def refresh_theme(self):
+        self.setStyleSheet(f"background: {c('bg')};")
+        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
+        self.header.refresh()
+        self.card_search.refresh()
+        self.card_respuesta.refresh()
+        self._style_search_frame()
+        self._style_search_entry()
+        style_primary(self.btn_preguntar)
+        self.lbl_icono.setStyleSheet(f"background: transparent; border: none; color: {c('text2')};")
+        self.lbl_titulo.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+        self.lbl_respuesta.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+        self.lbl_fuentes_titulo.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
+        self._limpiar_fuentes()
+
+
 class VentanaPrincipal(QMainWindow):
 
     def __init__(self):
@@ -3423,9 +4170,10 @@ class VentanaPrincipal(QMainWindow):
         NAV = [
             ("⏱",  "Enfoque"),
             ("📓",  "Cuaderno"),
-            ("🧠",  "Buscador IA"),
+            ("🧠",  "Find Notes"),
             ("🃏",  "Flashcards"),
             ("🎙️",  "Notas de Voz"),
+            ("💬",  "Asistente IA"),
             ("📊",  "Estadísticas"),
         ]
         self._nav_btns = []
@@ -3463,6 +4211,7 @@ class VentanaPrincipal(QMainWindow):
         self.panel_buscador     = BuscadorPanel(self.cerebro)
         self.panel_flashcards   = FlashcardsPanel(self.cerebro)
         self.panel_notas_voz    = NotasVozPanel(self.cerebro)
+        self.panel_asistente_ia = AsistenteIAPanel()
         self.panel_estadisticas = EstadisticasPanel(self.cerebro)
 
         self.stack.addWidget(self.panel_pomodoro)       # índice 0
@@ -3470,7 +4219,8 @@ class VentanaPrincipal(QMainWindow):
         self.stack.addWidget(self.panel_buscador)       # índice 2
         self.stack.addWidget(self.panel_flashcards)     # índice 3
         self.stack.addWidget(self.panel_notas_voz)      # índice 4
-        self.stack.addWidget(self.panel_estadisticas)   # índice 5
+        self.stack.addWidget(self.panel_asistente_ia)   # índice 5
+        self.stack.addWidget(self.panel_estadisticas)   # índice 6
 
         root.addWidget(self.stack)
 
@@ -3501,7 +4251,7 @@ class VentanaPrincipal(QMainWindow):
             self.panel_flashcards.refrescar()
         if idx == 4:
             self.panel_notas_voz.actualizar_categorias()
-        if idx == 5:
+        if idx == 6:
             self.panel_estadisticas.cargar_datos()
 
     def _ir_a_crear_flashcard(self, respuesta: str):
@@ -3570,6 +4320,7 @@ class VentanaPrincipal(QMainWindow):
         self.panel_buscador.refresh_theme()
         self.panel_flashcards.refresh_theme()
         self.panel_notas_voz.refresh_theme()
+        self.panel_asistente_ia.refresh_theme()
         self.panel_estadisticas.refresh_theme()
 
 

@@ -1,14 +1,9 @@
-# --- GUI ---
-PyQt6>=6.6.0
-
-# --- Lectura y procesamiento de PDFs ---
-pdfplumber>=0.10.0
-
-# --- Embeddings / búsqueda semántica (core/embeddings.py) ---
-sentence-transformers>=2.7.0
-numpy>=1.24.0
-
-# --- Transcripción de voz (opcional, cargado en runtime con try/except) ---
-openai-whisper>=20231117
-sounddevice>=0.4.6
-soundfile>=0.12.1
+sentence-transformers
+numpy
+customtkinter
+PyQt6
+pdfplumber
+openai-whisper
+sounddevice
+soundfile
+requests

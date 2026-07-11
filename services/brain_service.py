@@ -2,14 +2,29 @@
 # Maneja la persistencia en SQLite y la búsqueda semántica (con fallback por texto)
 
 import os
+import sys
 import sqlite3
 from pathlib import Path
 
 # ── Ruta absoluta a la base de datos ──────────────────────────────────────────
-# Este archivo vive en  <proyecto>/services/brain_service.py
-# La base de datos está en  <proyecto>/data/brain.db
-_BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH   = _BASE_DIR / "data" / "brain.db"
+# En modo desarrollo (python main.py) este archivo vive en
+# <proyecto>/services/brain_service.py y la BD está en <proyecto>/data/brain.db
+#
+# En modo "congelado" (empaquetado con PyInstaller como .exe), __file__ ya NO
+# sirve: PyInstaller extrae el proyecto a una carpeta temporal (sys._MEIPASS)
+# que se borra al cerrar el programa. Si guardáramos ahí la base de datos,
+# el usuario perdería todos sus apuntes/flashcards cada vez que cierre la app.
+# Por eso, cuando la app está congelada, usamos una carpeta persistente en el
+# perfil del usuario (equivalente a "Documentos/AppData" de cualquier programa
+# de escritorio instalado en Windows).
+if getattr(sys, "frozen", False):
+    _APPDATA = os.environ.get("APPDATA") or os.path.expanduser("~")
+    _BASE_DIR = Path(_APPDATA) / "Second Brain AI"
+else:
+    _BASE_DIR = Path(__file__).resolve().parent.parent
+
+DB_PATH = _BASE_DIR / "data" / "brain.db"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # ── Soporte de embeddings (opcional) ──────────────────────────────────────────
 try:
@@ -60,10 +75,16 @@ class BrainService:
                 minutos INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS descanso_temp (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                minutos INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sesiones_concentracion (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre          TEXT    NOT NULL,
                 minutos_totales INTEGER NOT NULL,
+                minutos_descanso INTEGER NOT NULL DEFAULT 0,
                 fecha           TEXT    DEFAULT (datetime('now','localtime'))
             );
 
@@ -102,6 +123,17 @@ class BrainService:
             cols = [r[1] for r in self._conn.execute("PRAGMA table_info(flashcards)").fetchall()]
             if col_name not in cols:
                 self._conn.execute(sql)
+        self._conn.commit()
+
+        # Migracion: agregar minutos_descanso a sesiones_concentracion si no existe
+        # (usuarios con una base de datos creada antes de esta funcionalidad)
+        cols_sesiones = [r[1] for r in self._conn.execute(
+            "PRAGMA table_info(sesiones_concentracion)"
+        ).fetchall()]
+        if "minutos_descanso" not in cols_sesiones:
+            self._conn.execute(
+                "ALTER TABLE sesiones_concentracion ADD COLUMN minutos_descanso INTEGER NOT NULL DEFAULT 0"
+            )
         self._conn.commit()
 
         # Sembramos un curso "General" por defecto para que la lista de
@@ -258,35 +290,56 @@ class BrainService:
     def guardar_pomodoro(self, minutos: int):
         """
         Suma minutos al acumulador temporal de la sesión actual.
-        Se llama automáticamente cada vez que un temporizador llega a 0.
+        Se llama automáticamente cada vez que un temporizador de estudio llega a 0.
         """
         self._conn.execute(
             "INSERT INTO pomodoro_temp (minutos) VALUES (?)", (minutos,)
         )
         self._conn.commit()
 
+    def guardar_descanso(self, minutos: int):
+        """
+        Suma minutos al acumulador temporal de descanso de la sesión actual.
+        Se llama cuando un descanso termina (completo o saltado).
+        """
+        if minutos <= 0:
+            return
+        self._conn.execute(
+            "INSERT INTO descanso_temp (minutos) VALUES (?)", (minutos,)
+        )
+        self._conn.commit()
+
     def obtener_texto_estadisticas(self) -> str:
         """
-        Devuelve el tiempo acumulado temporal como string legible.
-        Ejemplo: '1 h 25 min'
+        Devuelve el tiempo acumulado temporal (estudio + descanso) como string legible.
+        Ejemplo: '1 h 25 min enfocado  ·  15 min de descanso'
         """
-        total = self._conn.execute(
+        total_estudio = self._conn.execute(
             "SELECT COALESCE(SUM(minutos), 0) FROM pomodoro_temp"
         ).fetchone()[0]
-        h, m = divmod(int(total), 60)
-        return f"{h} h {m} min"
+        total_descanso = self._conn.execute(
+            "SELECT COALESCE(SUM(minutos), 0) FROM descanso_temp"
+        ).fetchone()[0]
+        h, m = divmod(int(total_estudio), 60)
+        h_d, m_d = divmod(int(total_descanso), 60)
+        texto_descanso = f"{h_d} h {m_d} min" if h_d > 0 else f"{m_d} min"
+        return f"{h} h {m} min  ·  Descanso: {texto_descanso}"
 
     def consolidar_sesion_actual(self) -> bool:
         """
-        Guarda el acumulado temporal como una nueva 'Sesión de concentración N'
-        y limpia el acumulador.
-        Devuelve True si había tiempo que guardar, False si el acumulador estaba vacío.
+        Guarda el acumulado temporal (estudio + descanso) como una nueva
+        'Sesión de concentración N' y limpia ambos acumuladores.
+        Devuelve True si había tiempo de estudio que guardar, False si el
+        acumulador de estudio estaba vacío.
         """
-        total = self._conn.execute(
+        total_estudio = self._conn.execute(
             "SELECT COALESCE(SUM(minutos), 0) FROM pomodoro_temp"
         ).fetchone()[0]
+        total_descanso = self._conn.execute(
+            "SELECT COALESCE(SUM(minutos), 0) FROM descanso_temp"
+        ).fetchone()[0]
 
-        if int(total) <= 0:
+        if int(total_estudio) <= 0:
             return False
 
         # Número de la siguiente sesión
@@ -296,16 +349,19 @@ class BrainService:
         nombre = f"Sesión de concentración {n + 1}"
 
         self._conn.execute(
-            "INSERT INTO sesiones_concentracion (nombre, minutos_totales) VALUES (?, ?)",
-            (nombre, int(total))
+            "INSERT INTO sesiones_concentracion (nombre, minutos_totales, minutos_descanso) "
+            "VALUES (?, ?, ?)",
+            (nombre, int(total_estudio), int(total_descanso))
         )
         self._conn.execute("DELETE FROM pomodoro_temp")
+        self._conn.execute("DELETE FROM descanso_temp")
         self._conn.commit()
         return True
 
     def borrar_historial_pomodoro(self):
-        """Elimina todo el acumulador temporal (sin guardar como sesión)."""
+        """Elimina todo el acumulador temporal (estudio y descanso), sin guardar como sesión."""
         self._conn.execute("DELETE FROM pomodoro_temp")
+        self._conn.execute("DELETE FROM descanso_temp")
         self._conn.commit()
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -315,19 +371,20 @@ class BrainService:
     def obtener_sesiones_guardadas(self) -> list:
         """
         Devuelve todas las sesiones de concentración guardadas, ordenadas por id.
-        Cada elemento es un dict: {'id', 'nombre', 'minutos', 'fecha'}
+        Cada elemento es un dict: {'id', 'nombre', 'minutos', 'minutos_descanso', 'fecha'}
         """
         rows = self._conn.execute(
-            "SELECT id, nombre, minutos_totales, fecha "
+            "SELECT id, nombre, minutos_totales, minutos_descanso, fecha "
             "FROM sesiones_concentracion ORDER BY id"
         ).fetchall()
 
         return [
             {
-                "id":      row["id"],
-                "nombre":  row["nombre"],
-                "minutos": row["minutos_totales"],
-                "fecha":   row["fecha"],
+                "id":               row["id"],
+                "nombre":           row["nombre"],
+                "minutos":          row["minutos_totales"],
+                "minutos_descanso": row["minutos_descanso"],
+                "fecha":            row["fecha"],
             }
             for row in rows
         ]
