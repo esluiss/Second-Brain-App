@@ -19,4 +19,4 @@ class Config:
     #    No edites core/groq_assistant.py — este es el único lugar necesario.
     #    Prioridad: variable de entorno GROQ_API_KEY > este valor.
     #    No subas este archivo con tu clave real a un repositorio público.
-    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "tu_clave_aquí")
