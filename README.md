@@ -204,8 +204,8 @@ La base de datos SQLite (`data/brain.db`) se crea e inicializa automáticamente 
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/<tu-usuario>/<tu-repositorio>.git
-cd <tu-repositorio>
+git clone https://github.com/esluiss/Second-Brain-App.git
+cd Second-Brain-App
 
 # 2. Crear y activar un entorno virtual (recomendado)
 python -m venv venv
@@ -253,10 +253,10 @@ Si no se configura ninguna clave, el resto de la aplicación sigue funcionando c
 | Campo | Detalle |
 |---|---|
 | Curso | Programación Orientada a Objetos |
-| Universidad | `[Nombre de tu universidad]` |
-| Autor | `[Tu nombre completo]` |
-| Docente | `[Nombre del profesor]` |
-| Periodo académico | `[Ciclo / semestre]` |
+| Universidad | Universidad Nacional de Ingeniería |
+| Autores | Diego Luis Vila Tuirez, Adriano Alejandro García Asto, Jesús Alfonso Gonzales Aguado  |
+| Docente | Washington Ernesto Loayza Mejía |
+| Periodo académico | 2026-I |
 
 ---
 
