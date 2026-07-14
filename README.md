@@ -239,18 +239,6 @@ Si no se configura ninguna clave, el resto de la aplicación sigue funcionando c
 
 ---
 
-## 🔒 Notas de seguridad
-
-> ⚠️ **Importante antes de subir este repositorio a GitHub:**
-> `app/config.py` actualmente incluye una clave de Groq como valor por defecto directamente en el código (`os.environ.get("GROQ_API_KEY", "...")`). Si el repositorio es público, esa clave quedará expuesta.
->
-> Se recomienda:
-> - Eliminar la clave por defecto del código y dejar únicamente `os.environ.get("GROQ_API_KEY")`.
-> - Revocar/rotar la clave actual desde [console.groq.com/keys](https://console.groq.com/keys).
-> - Añadir un archivo `.env` (excluido vía `.gitignore`) para el desarrollo local.
-
----
-
 ## 🗺️ Roadmap / mejoras futuras
 
 - [ ] Retirar la clave de API hardcodeada de `config.py`
