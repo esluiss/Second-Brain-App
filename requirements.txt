@@ -1,8 +1,26 @@
-sentence-transformers
-numpy
-PyQt6
+# ── Interfaz gráfica ──────────────────────────────────────────────
+PyQt6              # GUI. Incluye PyQt6.QtMultimedia (reproducción de audio).
+
+# ── Persistencia y datos ──────────────────────────────────────────
+numpy               # Vectores de embeddings y procesamiento de audio.
+
+# ── Búsqueda semántica (Buscador inteligente) ─────────────────────
+sentence-transformers   # Genera los embeddings para búsqueda por significado.
+
+# ── Lectura de PDFs (ingesta en Cuaderno) ─────────────────────────
 pdfplumber
-openai-whisper
-sounddevice
-soundfile
-requests
+
+# ── Notas de voz (grabación + transcripción) ──────────────────────
+openai-whisper       # Transcripción de audio a texto (modelo "small").
+                     # Requisito de SISTEMA (no se instala con pip):
+                     #   ffmpeg debe estar instalado y en el PATH.
+                     #   Windows:  choco install ffmpeg   (o descargar de ffmpeg.org)
+                     #   macOS:    brew install ffmpeg
+                     #   Linux:    sudo apt install ffmpeg
+                     # Instala automáticamente PyTorch como dependencia (puede
+                     # tardar varios minutos la primera vez).
+sounddevice          # Captura de audio del micrófono.
+soundfile            # Lectura/escritura de archivos de audio (.wav).
+
+# ── Asistente IA (Groq + búsqueda web) ────────────────────────────
+requests             # Llamadas a la API de Groq y scraping de DuckDuckGo.
