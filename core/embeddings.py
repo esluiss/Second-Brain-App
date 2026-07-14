@@ -7,7 +7,7 @@ import sqlite3
 from sentence_transformers import SentenceTransformer
 
 
-MODEL_NAME = "all-MiniLM-L6-v2"   # ~22 MB, rápido, excelente para español + inglés
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"   # ~22 MB, rápido, excelente para español + inglés
 
 
 def _vec_to_blob(vec: np.ndarray) -> bytes:
@@ -88,7 +88,7 @@ class EmbeddingManager:
 
             sim = _cosine_similarity(query_vec, doc_vec)
             # Normalizamos de [-1,1] a [0,1] para mostrarlo como porcentaje
-            score_01 = (sim + 1) / 2
+            score_01 = max(0.0, min(1.0, (sim - 0.12) / 0.33))
             resultados.append({
                 "texto":          row["texto"],
                 "categoria":      row["categoria"],

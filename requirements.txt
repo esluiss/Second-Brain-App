@@ -1,6 +1,5 @@
 sentence-transformers
 numpy
-customtkinter
 PyQt6
 pdfplumber
 openai-whisper

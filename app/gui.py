@@ -182,7 +182,14 @@ class FadeIn(QObject):
         self.anim.setStartValue(0.0)
         self.anim.setEndValue(1.0)
         self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.anim.start()
+        # OJO: no llamar a self.anim.start() directamente aquí. Si FadeIn se
+        # crea antes de que el event loop de Qt esté corriendo (p. ej. durante
+        # la construcción de la ventana, antes de _app.exec()), la animación
+        # mide su duración en tiempo real transcurrido y, para cuando el loop
+        # arranca, ya se "pasó" de los 350ms y salta directo al final sin
+        # animar nada. QTimer.singleShot(0, ...) encola el arranque para el
+        # primer ciclo del event loop, cuando el widget ya es visible.
+        QTimer.singleShot(0, self.anim.start)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -513,10 +520,58 @@ class BarChartWidget(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  CLASE BASE PARA LOS PANELES DE NAVEGACIÓN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PanelBase(QWidget):
+    """
+    Clase base de la que heredan los 7 paneles de navegación
+    (Pomodoro, Cuaderno, Buscador, Flashcards, Notas de Voz,
+    Estadísticas y Asistente IA).
+
+    Antes de esta clase, cada panel repetía las mismas 3 líneas al
+    inicio de su propio refresh_theme() (fondo del panel, fondo del
+    scroll interno y refresco del encabezado). Ahora esas líneas viven
+    en un solo lugar, y cada panel solo se ocupa de lo que le es propio.
+
+    Esto es el patrón "Método Plantilla" (Template Method): la clase
+    base define el esqueleto del algoritmo (refresh_theme) y delega los
+    pasos específicos a un método que cada subclase sobrescribe
+    (_refresh_specific).
+    """
+
+    def refresh_theme(self):
+        # Paso común a todo panel: fondo general.
+        self.setStyleSheet(f"background: {c('bg')};")
+
+        # Paso común, pero opcional: no todos los paneles tienen un
+        # widget de scroll (bg_widget) o un SectionHeader propio (por
+        # ejemplo NotasVozPanel arma su título a mano), así que se
+        # verifica su existencia con hasattr antes de tocarlos.
+        if hasattr(self, "bg_widget"):
+            self.bg_widget.setStyleSheet(f"background: {c('bg')};")
+        if hasattr(self, "header"):
+            self.header.refresh()
+
+        # Paso específico: cada panel concreto lo sobrescribe para
+        # actualizar sus propias Cards, labels y botones.
+        self._refresh_specific()
+
+    def _refresh_specific(self):
+        """
+        Hook a sobrescribir en cada subclase. Si un panel no lo
+        sobrescribe, no pasa nada (no rompe la app) — pero en la
+        práctica los 7 paneles sí lo hacen, porque cada uno tiene
+        widgets propios que colorear.
+        """
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  PANEL POMODORO
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class PomodoroPanel(QWidget):
+class PomodoroPanel(PanelBase):
     sesion_guardada = pyqtSignal()
 
     ESTUDIO_SEG  = 25 * 60
@@ -777,7 +832,6 @@ class PomodoroPanel(QWidget):
 
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
-        FadeIn(self.bg_widget)
         self._actualizar_reloj()
         self._init_player()
 
@@ -1137,10 +1191,7 @@ class PomodoroPanel(QWidget):
             }}
         """)
 
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
+    def _refresh_specific(self):
         self.card.refresh()
         self.card_musica.refresh()
         self.lbl_clock.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
@@ -1471,7 +1522,7 @@ class RichTextEditor(QWidget):
 #  PANEL CUADERNO
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class CuadernoPanel(QWidget):
+class CuadernoPanel(PanelBase):
     convertir_en_flashcard = pyqtSignal(str)
 
     def __init__(self, cerebro, parent=None):
@@ -1595,7 +1646,6 @@ class CuadernoPanel(QWidget):
         vbox.addWidget(self.card)
         scroll.setWidget(self.bg_widget)
         outer.addWidget(scroll)
-        FadeIn(self.bg_widget)
         self._refrescar_categorias(mantener_seleccion=False)
         return w
 
@@ -2044,11 +2094,8 @@ class CuadernoPanel(QWidget):
             self.lbl_msg.setStyleSheet("background: transparent; border: none;")
         ))
 
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
+    def _refresh_specific(self):
         self.hist_bg.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
         self.card.refresh()
         self.lbl_titulo.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
         self.lbl_cat.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
@@ -2072,7 +2119,7 @@ class CuadernoPanel(QWidget):
 #  PANEL BUSCADOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class BuscadorPanel(QWidget):
+class BuscadorPanel(PanelBase):
     def __init__(self, cerebro, parent=None):
         super().__init__(parent)
         self.cerebro = cerebro
@@ -2160,7 +2207,6 @@ class BuscadorPanel(QWidget):
 
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
-        FadeIn(self.bg_widget)
 
     # ── Búsqueda ──────────────────────────────────────────────────
     def _search(self):
@@ -2368,10 +2414,7 @@ class BuscadorPanel(QWidget):
             }}
         """)
 
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
+    def _refresh_specific(self):
         self.card_search.refresh()
         self._style_search_frame()
         self._style_search_entry()
@@ -2386,7 +2429,7 @@ class BuscadorPanel(QWidget):
 #  PANEL FLASHCARDS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class FlashcardsPanel(QWidget):
+class FlashcardsPanel(PanelBase):
     """
     Panel reorganizado: Cursos → Temas → Flashcards + Sesión de estudio.
     Vista 0: Biblioteca  (árbol cursos/temas)
@@ -2461,7 +2504,6 @@ class FlashcardsPanel(QWidget):
 
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
-        FadeIn(self.bg_widget)
         self._cambiar_tab(0)
 
     # ════════════════════════════════════════════════════════════════
@@ -3085,10 +3127,7 @@ class FlashcardsPanel(QWidget):
             etiqueta.setStyleSheet("background: transparent; border: none;")
         ))
 
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
+    def _refresh_specific(self):
         self.card_crear.refresh()
         self.card_estudio.refresh()
         self.card_nuevo_curso.refresh()
@@ -3190,7 +3229,7 @@ class GrabacionWorker(QObject):
 #  PANEL: Notas de Voz
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class NotasVozPanel(QWidget):
+class NotasVozPanel(PanelBase):
     """Panel para grabar notas de voz y transcribirlas con Whisper (local)."""
 
     def __init__(self, cerebro, parent=None):
@@ -3211,20 +3250,22 @@ class NotasVozPanel(QWidget):
     # ── UI ─────────────────────────────────────────────────────────────────────
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 28, 32, 28)
-        root.setSpacing(20)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Título
-        self.lbl_titulo = QLabel("🎙️  Notas de Voz")
-        set_font(self.lbl_titulo, 22, bold=True)
-        self.lbl_titulo.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
-        root.addWidget(self.lbl_titulo)
+        self.header = SectionHeader("Notas de Voz")
+        root.addWidget(self.header)
+
+        content = QVBoxLayout()
+        content.setContentsMargins(32, 28, 32, 28)
+        content.setSpacing(20)
+        root.addLayout(content)
 
         # Subtítulo
         self.lbl_sub = QLabel("Graba tu idea y Whisper la convierte a texto automáticamente.")
         set_font(self.lbl_sub, 13)
         self.lbl_sub.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
-        root.addWidget(self.lbl_sub)
+        content.addWidget(self.lbl_sub)
 
         # ── Tarjeta principal ──────────────────────────────────────────────────
         self.card = Card()
@@ -3271,13 +3312,13 @@ class NotasVozPanel(QWidget):
         self.btn_grabar.clicked.connect(self._toggle_grabacion)
         card_lay.addWidget(self.btn_grabar)
 
-        root.addWidget(self.card)
+        content.addWidget(self.card)
 
         # ── Sección transcripción ──────────────────────────────────────────────
         self.lbl_trans = QLabel("Transcripción")
         set_font(self.lbl_trans, 14, bold=True)
         self.lbl_trans.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
-        root.addWidget(self.lbl_trans)
+        content.addWidget(self.lbl_trans)
 
         self.txt_transcripcion = QTextEdit()
         self.txt_transcripcion.setPlaceholderText(
@@ -3288,7 +3329,7 @@ class NotasVozPanel(QWidget):
             f"border: 1.5px solid {c('border')}; border-radius: 10px; padding: 12px; }}"
         )
         set_font(self.txt_transcripcion, 13)
-        root.addWidget(self.txt_transcripcion)
+        content.addWidget(self.txt_transcripcion)
 
         # ── Fila categoría + guardar ───────────────────────────────────────────
         fila = QHBoxLayout()
@@ -3320,17 +3361,17 @@ class NotasVozPanel(QWidget):
         self.btn_guardar.clicked.connect(self._guardar_nota)
         fila.addWidget(self.btn_guardar)
 
-        root.addLayout(fila)
+        content.addLayout(fila)
 
         # ── Aviso dependencias ─────────────────────────────────────────────────
         self.lbl_aviso = QLabel("")
         self.lbl_aviso.setWordWrap(True)
         set_font(self.lbl_aviso, 11)
         self.lbl_aviso.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
-        root.addWidget(self.lbl_aviso)
+        content.addWidget(self.lbl_aviso)
 
         self._verificar_dependencias()
-        root.addStretch()
+        content.addStretch()
 
         # Timer VU-meter (parpadeo durante grabación)
         self._vu_timer = QTimer(self)
@@ -3370,9 +3411,7 @@ class NotasVozPanel(QWidget):
         self._refrescar_categorias()
 
     # ── Tema ──────────────────────────────────────────────────────────────────
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.lbl_titulo.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
+    def _refresh_specific(self):
         self.lbl_sub.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
         self.lbl_trans.setStyleSheet(f"color: {c('text')}; background: transparent; border: none;")
         self.lbl_cat.setStyleSheet(f"color: {c('text2')}; background: transparent; border: none;")
@@ -3546,7 +3585,7 @@ class NotasVozPanel(QWidget):
         self.lbl_tiempo.setText("00:00")
 
 
-class EstadisticasPanel(QWidget):
+class EstadisticasPanel(PanelBase):
     def __init__(self, cerebro, parent=None):
         super().__init__(parent)
         self.cerebro = cerebro
@@ -3625,7 +3664,6 @@ class EstadisticasPanel(QWidget):
 
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
-        FadeIn(self.bg_widget)
 
     # ── Carga y refresco de datos ──────────────────────────────────────────────
     def cargar_datos(self):
@@ -3765,10 +3803,7 @@ class EstadisticasPanel(QWidget):
             self.cargar_datos()
 
     # ── Tema ──────────────────────────────────────────────────────────────────
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
+    def _refresh_specific(self):
         self.stats_card.refresh()
         self.chart_card.refresh()
         self.sessions_card.refresh()
@@ -3840,7 +3875,7 @@ class AIWorker(QObject):
 #  PANEL: Asistente IA (Groq + búsqueda web real)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class AsistenteIAPanel(QWidget):
+class AsistenteIAPanel(PanelBase):
     """
     Chat con IA (Groq) que primero busca en internet (DuckDuckGo) y luego
     responde citando fuentes. Los enlaces mostrados son URLs reales de las
@@ -3959,7 +3994,6 @@ class AsistenteIAPanel(QWidget):
 
         scroll.setWidget(self.bg_widget)
         root.addWidget(scroll)
-        FadeIn(self.bg_widget)
 
     # ── Lógica ────────────────────────────────────────────────────
     def _preguntar(self):
@@ -4099,10 +4133,7 @@ class AsistenteIAPanel(QWidget):
             }}
         """)
 
-    def refresh_theme(self):
-        self.setStyleSheet(f"background: {c('bg')};")
-        self.bg_widget.setStyleSheet(f"background: {c('bg')};")
-        self.header.refresh()
+    def _refresh_specific(self):
         self.card_search.refresh()
         self.card_respuesta.refresh()
         self._style_search_frame()
@@ -4124,7 +4155,7 @@ class VentanaPrincipal(QMainWindow):
         self.setMinimumSize(820, 560)
         self._dark = False
         self.cerebro = BrainService()
-        self._active_idx = 0
+        self._active_idx = -1  # ningún panel activo todavía (ver _nav_to)
         self._build()
 
     def _build(self):
@@ -4234,6 +4265,14 @@ class VentanaPrincipal(QMainWindow):
         self.panel_flashcards.cursos_actualizados.connect(self.panel_cuaderno.actualizar_categorias)
         self.panel_flashcards.cursos_actualizados.connect(self.panel_notas_voz.actualizar_categorias)
 
+        # _apply_theme() traía la hoja de estilos global de las scrollbars
+        # (y otros detalles) pero antes solo se llamaba desde _toggle_theme(),
+        # es decir, recién cuando el usuario tocaba "Modo oscuro" por primera
+        # vez. Por eso al abrir la app se veía la scrollbar nativa del sistema
+        # (sin redondear, gris, con flechitas) en vez de la nuestra. Llamarlo
+        # aquí, al construir la ventana, hace que se vea bien desde el arranque.
+        self._apply_theme()
+
         self._nav_to(0)
 
     def _style_sidebar(self):
@@ -4241,10 +4280,19 @@ class VentanaPrincipal(QMainWindow):
             f"QFrame {{ background: {c('sidebar')}; border: none; }}")
 
     def _nav_to(self, idx: int):
+        if idx == self._active_idx:
+            # Ya estás en esta pestaña: no repetir el fade ni recargar nada.
+            return
         self._active_idx = idx
         for i, btn in enumerate(self._nav_btns):
             btn.setChecked(i == idx)
         self.stack.setCurrentIndex(idx)
+        # Antes cada panel disparaba su propio FadeIn una sola vez, al
+        # construirse (antes de que la ventana fuera visible), así que la
+        # animación nunca llegaba a verse. Ahora se dispara aquí, cada vez
+        # que el usuario navega a una sección, sobre el panel que realmente
+        # se está mostrando en ese momento.
+        FadeIn(self.stack.currentWidget())
         if idx == 1:
             self.panel_cuaderno.actualizar_categorias()
         if idx == 3:
